@@ -1,6 +1,7 @@
 #![feature(generic_const_exprs)]
 #![feature(inherent_associated_types)]
 
+use core::iter::IntoIterator;
 use core::iter::Iterator;
 use std::array;
 use std::iter::Cycle;
@@ -8,6 +9,7 @@ use bitvec::vec::BitVec;
 use itertools::multizip;
 use rand::distr::Distribution;
 use rand::distr::Uniform;
+use rand::RngExt;
 use rayon::iter::IndexedParallelIterator;
 use rayon::iter::IntoParallelRefIterator;
 use bitvec::array::BitArray;
@@ -84,8 +86,10 @@ where
         assert!(self.specificity > 1., "specificity must be > 1.0");
 
         let ln_complement = (1.0 - 1.0 / self.specificity).ln();
+        let mut rng = rand::rng();
         let uni: Uniform<f64> = Uniform::try_from(0. .. 1.).unwrap();
-        let selection_pool = (0..self.selection_pool_size).into_par_iter().map(|_|self.create_selection_vector(&uni, ln_complement)).collect::<Vec<_>>().into_iter().cycle();
+        let strong_selection_pool = (0..self.selection_pool_size).into_par_iter().map(|_|self.create_selection_vector(&uni, ln_complement)).collect::<Vec<_>>().into_iter().cycle();
+        let uniform_pool = (&mut rng).sample_iter(&uni).take(self.selection_pool_size).collect::<Vec<_>>().into_iter().cycle();
         
         let clauses = (0..self.clauses)
             .map(|_| Clause::<NUM_INPUTS, 256>::new())
@@ -93,7 +97,8 @@ where
 
         TsetlinTrainer {
             clauses,
-            selection_pool,
+            strong_selection_pool,
+            uniform_pool,
             threshold: self.threshold,
         }
     }
@@ -106,7 +111,8 @@ where
     [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     clauses: Vec<Clause<NUM_INPUTS, 256>>,
-    selection_pool: Cycle<std::vec::IntoIter<BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>>>,
+    strong_selection_pool: Cycle<std::vec::IntoIter<BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>>>,
+    uniform_pool: Cycle<std::vec::IntoIter<f64>>,
     threshold: i64,
 }
 
@@ -160,11 +166,12 @@ where
             (self.threshold - vote) as f64 / (2 * self.threshold) as f64
         };
         let cutoff = self.clauses.len() / 2;
-        let mut mask = self.dynamic_selection_mask(type_one_prob, self.clauses.len() / 2);
-        let mut t_two_mask = self.dynamic_selection_mask(type_two_prob, self.clauses.len() / 2);
+        let uni_vec = &self.uniform_pool.by_ref().take(self.clauses.len()).collect::<Vec<_>>();
+        let mut mask = self.dynamic_selection_mask(&uni_vec[..cutoff], type_one_prob);
+        let mut t_two_mask = self.dynamic_selection_mask(&uni_vec[cutoff..],  type_two_prob);
         mask.append(&mut t_two_mask);
         let mask_len = mask.len();
-        let strong_chunk = &self.selection_pool.by_ref().take(mask_len).collect::<Vec<_>>();
+        let strong_chunk = &self.strong_selection_pool.by_ref().take(mask_len).collect::<Vec<_>>();
         multizip((mask, &mut self.clauses, strong_chunk)).enumerate().par_bridge().for_each(|(ind, (fb , cl, strong_mask))| {
             match (fb, (ind < cutoff) == target) {
                 (true, true) => cl.type_one(&input, strong_mask),
@@ -180,14 +187,10 @@ where
         TMInference { clauses: self.clauses.into_iter().map(|x| x.save()).collect::<Vec<_>>(), cutoff }
     }
 
-    fn dynamic_selection_mask(&self, probability: f64, len: usize) -> BitVec {
-        let mut feedback_mask = BitVec::with_capacity(len);
-        let uni = Uniform::try_from(0.0..1.0).unwrap();
-        let mut rng = rand::rng();
-        for _i in 0..len {
-            feedback_mask.push(uni.sample(&mut rng) < probability);
-        }
-        feedback_mask
+    fn dynamic_selection_mask(&self, uni: &[f64], probability: f64) -> BitVec {
+        uni.into_iter().map(|x| {
+            *x < probability
+        }).collect::<BitVec>()
     }
 
 }
@@ -863,9 +866,12 @@ mod trainer_tests {
         let tm = TsetlinBuilder::<10>::new()
             .selection_pool_size(100)
             .build();
-        assert_eq!(tm.dynamic_selection_mask(0.5, 42).len(), 42);
-        assert_eq!(tm.dynamic_selection_mask(0.5, 0).len(), 0);
-        assert_eq!(tm.dynamic_selection_mask(0.5, 1000).len(), 1000);
+        let samples_42: Vec<f64> = vec![0.5; 42];
+        let samples_0: Vec<f64> = vec![];
+        let samples_1000: Vec<f64> = vec![0.5; 1000];
+        assert_eq!(tm.dynamic_selection_mask(&samples_42, 0.5).len(), 42);
+        assert_eq!(tm.dynamic_selection_mask(&samples_0, 0.5).len(), 0);
+        assert_eq!(tm.dynamic_selection_mask(&samples_1000, 0.5).len(), 1000);
     }
 
     #[test]
@@ -873,7 +879,8 @@ mod trainer_tests {
         let tm = TsetlinBuilder::<10>::new()
             .selection_pool_size(100)
             .build();
-        let mask = tm.dynamic_selection_mask(1.0, 100);
+        let samples: Vec<f64> = vec![0.5; 100];
+        let mask = tm.dynamic_selection_mask(&samples, 1.0);
         assert_eq!(mask.len(), 100);
         assert!(mask.iter().all(|b| *b));
     }
@@ -883,7 +890,8 @@ mod trainer_tests {
         let tm = TsetlinBuilder::<10>::new()
             .selection_pool_size(100)
             .build();
-        let mask = tm.dynamic_selection_mask(0.0, 100);
+        let samples: Vec<f64> = vec![0.5; 100];
+        let mask = tm.dynamic_selection_mask(&samples, 0.0);
         assert_eq!(mask.len(), 100);
         assert!(mask.iter().all(|b| !*b));
     }
