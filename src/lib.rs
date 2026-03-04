@@ -16,10 +16,6 @@ use rayon::iter::ParallelBridge;
 use rayon::iter::ParallelIterator;
 
 pub struct TsetlinBuilder<const NUM_INPUTS: usize>
-where
-    [(); NUM_INPUTS.div_ceil(usize::BITS as usize)]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
 {
     clauses: usize,
     selection_pool_size: usize,
@@ -28,12 +24,7 @@ where
 }
 
 impl<const NUM_INPUTS: usize> TsetlinBuilder<NUM_INPUTS>
-where
-    [(); NUM_INPUTS.div_ceil(usize::BITS as usize)]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
 {
-    type BDA = BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>;
     pub fn new() -> Self {
         Self {
             clauses: 20,
@@ -62,11 +53,20 @@ where
         self.specificity = s;
         self
     }
+}
+
+impl<const NUM_INPUTS: usize> TsetlinBuilder<NUM_INPUTS>
+where
+    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * NUM_INPUTS]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+{
+    type BDA = BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
     fn create_selection_vector(&self, uni: &Uniform<f64>, ln_complement: f64) -> Self::BDA {
         let mut index = 0;
         let mut rng = rand::rng();
-        let mut sv: Self::BDA = BitArray::new([usize::MAX; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]);
+        let mut sv: Self::BDA = BitArray::new([usize::MAX; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]);
         loop {
             index += (uni.sample(&mut rng).ln() / ln_complement).ceil() as usize;
             if index >= 2 * NUM_INPUTS {
@@ -101,38 +101,41 @@ where
 
 pub struct TsetlinTrainer<const NUM_INPUTS: usize>
 where
-    [(); NUM_INPUTS.div_ceil(usize::BITS as usize)]:,
+    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     clauses: Vec<Clause<NUM_INPUTS, 256>>,
-    selection_pool: Cycle<std::vec::IntoIter<BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>>>,
+    selection_pool: Cycle<std::vec::IntoIter<BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>>>,
     threshold: i64,
 }
 
 impl<const NUM_INPUTS: usize> TsetlinTrainer<NUM_INPUTS>
 where
-    [(); NUM_INPUTS.div_ceil(usize::BITS as usize)]:,
+    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    pub type BDA= BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>;
-    pub type BA= BitArray<[usize; NUM_INPUTS.div_ceil(usize::BITS as usize)]>;
+    pub type BDA= BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    pub type BA= BitArray<[usize; (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
 
 
-    pub fn fit(&mut self, inputs: Vec<(Self::BA, bool)>, epochs: usize){
+    pub fn fit(&mut self, inputs: &[(Self::BA, bool)], epochs: usize) -> Vec<f64> {
+        let mut accuracies = Vec::with_capacity(epochs);
         for _ in 0..epochs {
-            inputs.iter().for_each(|(input, target)|{
-                self.train(&input, *target);
-            });
+            let correct = inputs.iter()
+                .filter(|(input, target)| self.train(input, *target))
+                .count();
+            accuracies.push(correct as f64 / inputs.len() as f64);
         }
+        accuracies
     }
     pub fn train(
         &mut self,
         _input: &Self::BA,
         target: bool,
-    ) {
+    ) -> bool {
         let mut input: Self::BDA = BitArray::ZERO;
         let rev = !*_input;
         input[..NUM_INPUTS].copy_from_bitslice(&_input[..NUM_INPUTS]);
@@ -145,6 +148,7 @@ where
                 (_,_) => 0,
             }
         }).sum::<i64>().clamp(-self.threshold, self.threshold);
+        let correct = (vote >= 0) == target;
         let type_one_prob = if target == true {
             (self.threshold - vote) as f64 / (2 * self.threshold) as f64
         } else {
@@ -168,6 +172,7 @@ where
                 (false, _) => {},
             }
         });
+        correct
     }
 
     pub fn save(self) -> TMInference<NUM_INPUTS> {
@@ -190,9 +195,9 @@ where
 #[derive(Debug, Clone)]
 pub struct TMInference<const NUM_INPUTS: usize>
 where
-    [(); NUM_INPUTS.div_ceil(usize::BITS as usize)]:,
+    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     clauses: Vec<ClauseInference<NUM_INPUTS, 256>>,
     cutoff: usize
@@ -200,12 +205,12 @@ where
 
 impl<const NUM_INPUTS: usize> TMInference<NUM_INPUTS> 
 where
-    [(); NUM_INPUTS.div_ceil(usize::BITS as usize)]:,
+    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    pub type BA= BitArray<[usize; NUM_INPUTS.div_ceil(usize::BITS as usize)]>;
-    pub type BDA= BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>;
+    pub type BA= BitArray<[usize; (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    pub type BDA= BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
     pub fn run(&self, _input: &Self::BA) -> bool {
         let mut input: Self::BDA = BitArray::ZERO;
@@ -227,20 +232,20 @@ where
 struct ClauseInference<const NUM_INPUTS: usize, const AUTO_STATES: usize>
 where
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    include_mask: BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
+    include_mask: BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
     include_count: usize,
 }
 
 impl<const NUM_INPUTS: usize, const AUTO_STATES: usize> ClauseInference<NUM_INPUTS, AUTO_STATES>
 where
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     fn run(
         &self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
+        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) -> bool {
         let matched = *expanded_input & self.include_mask;
         self.include_count - matched.count_ones() == 0
@@ -255,17 +260,17 @@ where
 struct Clause<const NUM_INPUTS: usize, const AUTO_STATES: usize>
 where
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     automata: [Automaton<AUTO_STATES>; 2 * NUM_INPUTS],
-    include_mask: BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
+    include_mask: BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
     include_count: usize,
 }
 
 impl<const NUM_INPUTS: usize, const AUTO_STATES: usize> Clause<NUM_INPUTS, AUTO_STATES>
 where
     [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]:,
+    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     fn new() -> Self {
         Self {
@@ -285,7 +290,7 @@ where
     /// Returns true if all included literals are satisfied by the expanded input.
     fn run(
         &self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
+        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) -> bool {
         let matched = *expanded_input & self.include_mask;
         self.include_count - matched.count_ones() == 0
@@ -297,8 +302,8 @@ where
 
     fn type_one(
         &mut self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
-        strong_feedback_selector: &BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
+        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+        strong_feedback_selector: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) {
         let matched = *expanded_input & self.include_mask;
         let clause_output = self.include_count - matched.count_ones() == 0;
@@ -318,7 +323,7 @@ where
     }
     fn type_two(
         &mut self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS).div_ceil(usize::BITS as usize)]>,
+        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) {
         let matched = *expanded_input & self.include_mask;
         let clause_output = self.include_count - matched.count_ones() == 0;
@@ -591,8 +596,8 @@ mod builder_tests {
         let builder = TsetlinBuilder::<10>::new().specificity(3.0);
         let ln_complement = (1.0 - 1.0 / builder.specificity).ln();
         let uni = Uniform::try_from(0.0..1.0).unwrap();
-        let all_ones = BitArray::<[usize; (2 * 10_usize).div_ceil(usize::BITS as usize)]>::new(
-            [usize::MAX; (2 * 10_usize).div_ceil(usize::BITS as usize)],
+        let all_ones = BitArray::<[usize; (2 * 10 + usize::BITS as usize - 1) / usize::BITS as usize]>::new(
+            [usize::MAX; (2 * 10 + usize::BITS as usize - 1) / usize::BITS as usize],
         );
         for _ in 0..50 {
             let sv = builder.create_selection_vector(&uni, ln_complement);
@@ -609,7 +614,7 @@ mod clause_tests {
     use super::*;
 
     type TestClause = Clause<4, 256>;
-    type LitBits = BitArray<[usize; (2 * 4_usize).div_ceil(usize::BITS as usize)]>;
+    type LitBits = BitArray<[usize; (2 * 4 + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
     #[test]
     fn initial_mask_is_all_zeros() {
@@ -679,7 +684,7 @@ mod clause_tests {
 
         let mut input = LitBits::ZERO;
         input.set(0, true);
-        let strong = LitBits::new([usize::MAX; (2 * 4_usize).div_ceil(usize::BITS as usize)]);
+        let strong = LitBits::new([usize::MAX; (2 * 4 + usize::BITS as usize - 1) / usize::BITS as usize]);
 
         c.type_one(&input, &strong);
         assert_eq!(c.automata[0].state, 201);
@@ -703,7 +708,7 @@ mod clause_tests {
         let mut c = TestClause::new();
         let mut input = LitBits::ZERO;
         input.set(0, true);
-        let strong = LitBits::new([usize::MAX; (2 * 4_usize).div_ceil(usize::BITS as usize)]);
+        let strong = LitBits::new([usize::MAX; (2 * 4 + usize::BITS as usize - 1) / usize::BITS as usize]);
 
         assert!(!c.automata[0].include());
         c.type_one(&input, &strong);
@@ -795,7 +800,7 @@ mod clause_tests {
         let mut input = LitBits::ZERO;
         input.set(0, true);
         input.set(2, true);
-        let strong = LitBits::new([usize::MAX; (2 * 4_usize).div_ceil(usize::BITS as usize)]);
+        let strong = LitBits::new([usize::MAX; (2 * 4 + usize::BITS as usize - 1) / usize::BITS as usize]);
         c.type_one(&input, &strong);
 
         for (i, auto) in c.automata.iter().enumerate() {
@@ -827,7 +832,7 @@ mod clause_tests {
 mod trainer_tests {
     use super::*;
 
-    type InputBits = BitArray<[usize; 10_usize.div_ceil(usize::BITS as usize)]>;
+    type InputBits = BitArray<[usize; (10 + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
     #[test]
     fn train_does_not_panic() {
@@ -894,6 +899,33 @@ mod trainer_tests {
         for _ in 0..100 {
             tm.train(&input, true);
             tm.train(&input, false);
+        }
+    }
+
+    #[test]
+    fn train_returns_bool() {
+        let mut tm = TsetlinBuilder::<10>::new()
+            .selection_pool_size(100)
+            .build();
+        let input = InputBits::ZERO;
+        let result: bool = tm.train(&input, true);
+        let _ = result;
+    }
+
+    #[test]
+    fn fit_returns_per_epoch_accuracy() {
+        let mut tm = TsetlinBuilder::<10>::new()
+            .clauses(4)
+            .selection_pool_size(100)
+            .build();
+        let data = vec![
+            (InputBits::ZERO, true),
+            (InputBits::ZERO, false),
+        ];
+        let accuracies = tm.fit(&data, 5);
+        assert_eq!(accuracies.len(), 5);
+        for acc in &accuracies {
+            assert!(*acc >= 0.0 && *acc <= 1.0);
         }
     }
 }
