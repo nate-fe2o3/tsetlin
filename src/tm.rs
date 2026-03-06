@@ -11,14 +11,14 @@ use bitvec::array::BitArray;
 use rayon::iter::ParallelBridge;
 use rayon::iter::ParallelIterator;
 
-pub struct TsetlinBuilder<const NUM_INPUTS: usize>
+pub struct TMBuild<const I: usize>
 {
     clauses: usize,
     threshold: i64,
     specificity: f64,
 }
 
-impl<const NUM_INPUTS: usize> TsetlinBuilder<NUM_INPUTS>
+impl<const I: usize> TMBuild<I>
 {
     pub fn new() -> Self {
         Self {
@@ -44,49 +44,49 @@ impl<const NUM_INPUTS: usize> TsetlinBuilder<NUM_INPUTS>
     }
 }
 
-impl<const NUM_INPUTS: usize> TsetlinBuilder<NUM_INPUTS>
+impl<const I: usize> TMBuild<I>
 where
-    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); (I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    type BDA = BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    type BDA = BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
-    pub fn build(self) -> TsetlinTrainer<NUM_INPUTS> {
+    pub fn build(self) -> TMTrain<I> {
         assert!(self.clauses > 0, "clause count must be > 0");
         assert!(self.clauses % 2 == 0, "clause count must be even");
         assert!(self.threshold > 0, "threshold must be > 0");
         assert!(self.specificity > 1., "specificity must be > 1.0");
 
         let clauses = (0..self.clauses)
-            .map(|_| Clause::<NUM_INPUTS>::new(400, self.specificity))
+            .map(|_| Clause::<I>::new(400, self.specificity))
             .collect();
 
-        TsetlinTrainer {
+        TMTrain {
             clauses,
             threshold: self.threshold,
         }
     }
 }
 
-pub struct TsetlinTrainer<const NUM_INPUTS: usize>
+pub struct TMTrain<const I: usize>
 where
-    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); (I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    clauses: Vec<Clause<NUM_INPUTS>>,
+    clauses: Vec<Clause<I>>,
     threshold: i64,
 }
 
-impl<const NUM_INPUTS: usize> TsetlinTrainer<NUM_INPUTS>
+impl<const I: usize> TMTrain<I>
 where
-    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); (I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    pub type BDA= BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
-    pub type BA= BitArray<[usize; (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    pub type BDA= BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    pub type BA= BitArray<[usize; (I + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
 
 
@@ -109,8 +109,8 @@ where
     ) -> bool {
         let mut input: Self::BDA = BitArray::ZERO;
         let rev = !*_input;
-        input[..NUM_INPUTS].copy_from_bitslice(&_input[..NUM_INPUTS]);
-        input[NUM_INPUTS..(2 * NUM_INPUTS)].copy_from_bitslice(&rev[..NUM_INPUTS]);
+        input[..I].copy_from_bitslice(&_input[..I]);
+        input[I..(2 * I)].copy_from_bitslice(&rev[..I]);
         let clause_cutoff = self.clauses.len() / 2;
         let vote: i64 = self.clauses.par_iter().enumerate().map(|(ind, x)|{
             match (x.run(&input), ind < clause_cutoff) {
@@ -137,39 +137,50 @@ where
         });
         correct
     }
+}
 
-    pub fn save(self) -> TMInference<NUM_INPUTS> {
-        let cutoff = self.clauses.len() / 2;
-        TMInference { clauses: self.clauses.into_iter().map(|x| x.save()).collect::<Vec<_>>(), cutoff }
+#[derive(Debug, Clone)]
+pub struct TMInfer<const I: usize, const C: usize>
+where
+    [(); (I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+{
+    clauses: [ClauseInfer<I>; C],
+    cutoff: usize
+}
+
+impl<const I: usize, const C: usize> From<TMTrain<I>> for TMInfer<I, C>
+where
+    [(); (I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+{
+    fn from(t: TMTrain<I>) -> Self {
+        let mut iter = t.clauses.into_iter();
+        let clauses: [ClauseInfer<I>; C] = std::array::from_fn(|_| iter.next().unwrap().save());
+        Self {
+            clauses,
+            cutoff: C / 2,
+        }
     }
 
 }
 
-#[derive(Debug, Clone)]
-pub struct TMInference<const NUM_INPUTS: usize>
+impl<const I: usize, const C: usize> TMInfer<I, C> 
 where
-    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); (I + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    clauses: Vec<ClauseInference<NUM_INPUTS>>,
-    cutoff: usize
-}
-
-impl<const NUM_INPUTS: usize> TMInference<NUM_INPUTS> 
-where
-    [(); (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
-{
-    pub type BA= BitArray<[usize; (NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
-    pub type BDA= BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    pub type BA= BitArray<[usize; (I + usize::BITS as usize - 1) / usize::BITS as usize]>;
+    pub type BDA= BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>;
 
     pub fn run(&self, _input: &Self::BA) -> bool {
         let mut input: Self::BDA = BitArray::ZERO;
         let rev = !*_input;
-        input[..NUM_INPUTS].copy_from_bitslice(&_input[..NUM_INPUTS]);
-        input[NUM_INPUTS..(2 * NUM_INPUTS)].copy_from_bitslice(&rev[..NUM_INPUTS]);
+        input[..I].copy_from_bitslice(&_input[..I]);
+        input[I..(2 * I)].copy_from_bitslice(&rev[..I]);
         self.clauses.par_iter().enumerate().map(|(ind, x)|{
             match (x.run(&input), ind < self.cutoff) {
                 (true , true) => 1,
@@ -182,23 +193,23 @@ where
 }
 
 #[derive(Debug, Clone)]
-struct ClauseInference<const NUM_INPUTS: usize>
+struct ClauseInfer<const I: usize>
 where
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    include_mask: BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+    include_mask: BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>,
     include_count: usize,
 }
 
-impl<const NUM_INPUTS: usize> ClauseInference<NUM_INPUTS>
+impl<const I: usize> ClauseInfer<I>
 where
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     fn run(
         &self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+        expanded_input: &BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) -> bool {
         let matched = *expanded_input & self.include_mask;
         self.include_count - matched.count_ones() == 0
@@ -210,28 +221,28 @@ where
 
 /// Polarity is determined by position in the clause list: first half positive, second half negative.
 #[derive(Debug, Clone)]
-struct Clause<const NUM_INPUTS: usize>
+struct Clause<const I: usize>
 where
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
-    automata: [Automaton; 2 * NUM_INPUTS],
-    include_mask: BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+    automata: [Automaton; 2 * I],
+    include_mask: BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>,
     include_count: usize,
-    specificity: f64,
+    strong_threshold: f64,
 }
 
-impl<const NUM_INPUTS: usize> Clause<NUM_INPUTS>
+impl<const I: usize> Clause<I>
 where
-    [(); 2 * NUM_INPUTS]:,
-    [(); (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]:,
+    [(); 2 * I]:,
+    [(); (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]:,
 {
     fn new(automaton_states: u16, s: f64) -> Self {
         Self {
             automata: array::from_fn(|_| Automaton::new(automaton_states)),
             include_mask: BitArray::ZERO,
             include_count: 0,
-            specificity: s,
+            strong_threshold: (s - 1.) / s,
         }
     }
 
@@ -245,28 +256,27 @@ where
     /// Returns true if all included literals are satisfied by the expanded input.
     fn run(
         &self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+        expanded_input: &BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) -> bool {
         let matched = *expanded_input & self.include_mask;
         self.include_count - matched.count_ones() == 0
     }
 
-    fn save(self) -> ClauseInference<NUM_INPUTS> {
-        ClauseInference { include_mask: self.include_mask, include_count: self.include_count }
+    fn save(self) -> ClauseInfer<I> {
+        ClauseInfer { include_mask: self.include_mask, include_count: self.include_count }
     }
 
     fn type_one(
         &mut self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+        expanded_input: &BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) {
         let mut rng = rand::rng();
         let uni: Uniform<f64> = Uniform::try_from(0. .. 1.).unwrap();
-        let strong_feedback_threshold = (self.specificity - 1.) / self.specificity;
         let matched = *expanded_input & self.include_mask;
         let clause_output = self.include_count - matched.count_ones() == 0;
         for (literal, automaton) in multizip((expanded_input, &mut self.automata)) {
             let r = uni.sample(&mut rng);
-            let strong_feedback = r < strong_feedback_threshold;
+            let strong_feedback = r < self.strong_threshold;
             if clause_output && *literal.as_ref() {
                 if strong_feedback {
                 automaton.increment();
@@ -282,7 +292,7 @@ where
     }
     fn type_two(
         &mut self,
-        expanded_input: &BitArray<[usize; (2 * NUM_INPUTS + usize::BITS as usize - 1) / usize::BITS as usize]>,
+        expanded_input: &BitArray<[usize; (2 * I + usize::BITS as usize - 1) / usize::BITS as usize]>,
     ) {
         let matched = *expanded_input & self.include_mask;
         let clause_output = self.include_count - matched.count_ones() == 0;
@@ -464,14 +474,14 @@ mod builder_tests {
 
     #[test]
     fn build_with_defaults() {
-        let tm = TsetlinBuilder::<100>::new().build();
+        let tm = TMBuild::<100>::new().build();
         assert_eq!(tm.clauses.len(), 20);
         assert_eq!(tm.threshold, 10);
     }
 
     #[test]
     fn build_with_custom_params() {
-        let tm = TsetlinBuilder::<64>::new()
+        let tm = TMBuild::<64>::new()
             .clauses(40)
             .threshold(15)
             .specificity(3.9)
@@ -482,44 +492,44 @@ mod builder_tests {
 
     #[test]
     fn clauses_split_half_positive_half_negative() {
-        let tm = TsetlinBuilder::<10>::new().clauses(6).build();
+        let tm = TMBuild::<10>::new().clauses(6).build();
         assert_eq!(tm.clauses.len(), 6);
         assert_eq!(tm.clauses.len() / 2, 3);
     }
 
     #[test]
     fn clause_has_correct_automata_count() {
-        let tm = TsetlinBuilder::<10>::new().build();
+        let tm = TMBuild::<10>::new().build();
         assert_eq!(tm.clauses[0].automata.len(), 20);
     }
 
     #[test]
     #[should_panic(expected = "clause count must be > 0")]
     fn panics_on_zero_clauses() {
-        TsetlinBuilder::<10>::new().clauses(0).build();
+        TMBuild::<10>::new().clauses(0).build();
     }
 
     #[test]
     #[should_panic(expected = "clause count must be even")]
     fn panics_on_odd_clauses() {
-        TsetlinBuilder::<10>::new().clauses(3).build();
+        TMBuild::<10>::new().clauses(3).build();
     }
 
     #[test]
     #[should_panic(expected = "threshold must be > 0")]
     fn panics_on_zero_threshold() {
-        TsetlinBuilder::<10>::new().threshold(0).build();
+        TMBuild::<10>::new().threshold(0).build();
     }
 
     #[test]
     #[should_panic(expected = "specificity must be > 1.0")]
     fn panics_on_zero_specificity() {
-        TsetlinBuilder::<10>::new().specificity(0.0).build();
+        TMBuild::<10>::new().specificity(0.0).build();
     }
 
     #[test]
     fn default_builder_values() {
-        let builder = TsetlinBuilder::<10>::new();
+        let builder = TMBuild::<10>::new();
         assert_eq!(builder.clauses, 20);
         assert_eq!(builder.threshold, 10);
         assert!((builder.specificity - 3.0).abs() < f64::EPSILON);
@@ -693,7 +703,7 @@ mod trainer_tests {
 
     #[test]
     fn train_does_not_panic() {
-        let mut tm = TsetlinBuilder::<10>::new()
+        let mut tm = TMBuild::<10>::new()
             .build();
         let input = InputBits::ZERO;
         tm.train(&input, true);
@@ -701,7 +711,7 @@ mod trainer_tests {
 
     #[test]
     fn train_multiple_steps_no_panic() {
-        let mut tm = TsetlinBuilder::<10>::new()
+        let mut tm = TMBuild::<10>::new()
             .clauses(4)
             .build();
         let mut input = InputBits::ZERO;
@@ -715,7 +725,7 @@ mod trainer_tests {
 
     #[test]
     fn vote_clamp_stress() {
-        let mut tm = TsetlinBuilder::<10>::new()
+        let mut tm = TMBuild::<10>::new()
             .clauses(20)
             .threshold(5)
             .build();
@@ -728,7 +738,7 @@ mod trainer_tests {
 
     #[test]
     fn train_returns_bool() {
-        let mut tm = TsetlinBuilder::<10>::new()
+        let mut tm = TMBuild::<10>::new()
             .build();
         let input = InputBits::ZERO;
         let result: bool = tm.train(&input, true);
@@ -737,7 +747,7 @@ mod trainer_tests {
 
     #[test]
     fn fit_returns_per_epoch_accuracy() {
-        let mut tm = TsetlinBuilder::<10>::new()
+        let mut tm = TMBuild::<10>::new()
             .clauses(4)
             .build();
         let mut data = vec![
